@@ -9,13 +9,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var remaining = 0
     private var paused = false
 
-    // Fast mode (set BREAK_REMINDER_FAST=1) shrinks minutes to seconds for testing.
+    private let overlay = BreakOverlay()
+    private var postponesUsed = 0
+    private var warned = false
+    private var eyeElapsed = 0
+    private var suggestionIdx = 0
+
+    // Fast mode (BREAK_REMINDER_FAST=1) shrinks minutes to seconds for testing.
     private let fast = ProcessInfo.processInfo.environment["BREAK_REMINDER_FAST"] == "1"
 
     private var workMinutes: Int { UserDefaults.standard.object(forKey: "workMinutes") as? Int ?? 45 }
     private var breakMinutes: Int { UserDefaults.standard.object(forKey: "breakMinutes") as? Int ?? 10 }
-    private var workSeconds: Int { fast ? 5 : workMinutes * 60 }
-    private var breakSeconds: Int { fast ? 3 : breakMinutes * 60 }
+    private var workSeconds: Int { fast ? 6 : workMinutes * 60 }
+    private var breakSeconds: Int { fast ? 4 : breakMinutes * 60 }
+
+    // Behavior settings (UserDefaults-backed; sensible evidence-based defaults).
+    private var strictMode: Bool { UserDefaults.standard.object(forKey: "strictBreakScreen") as? Bool ?? true }
+    private var warnEnabled: Bool { UserDefaults.standard.object(forKey: "warnBeforeBreak") as? Bool ?? true }
+    private var eyeEnabled: Bool { UserDefaults.standard.object(forKey: "eye202020") as? Bool ?? false }
+    private var breakPlan: String {
+        UserDefaults.standard.string(forKey: "breakPlan") ?? "Stand up, look out a window, and refill your water."
+    }
+    private var skipDelaySeconds: Int { fast ? 1 : (UserDefaults.standard.object(forKey: "skipDelaySeconds") as? Int ?? 20) }
+    private var warnSeconds: Int { fast ? 3 : 60 }
+    private let maxPostpones = 2
+    private var postponeSeconds: Int { fast ? 3 : 5 * 60 }
+    private var eyeInterval: Int { fast ? 5 : 20 * 60 }
 
     private let monoFont = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
 
@@ -23,16 +42,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+
+        overlay.onSkip = { [weak self] in self?.skipBreak() }
+        overlay.onPostpone = { [weak self] in self?.postponeBreak() }
 
         phase = .working
         remaining = workSeconds
         updateTitle()
         startTimer()
         maybeNotifyChecklist()
+        dlog("launched: work=\(workSeconds)s break=\(breakSeconds)s strict=\(strictMode)")
     }
 
     // MARK: - Timer
@@ -48,9 +70,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func tick() {
         guard !paused else { return }
         remaining -= 1
-        if remaining <= 0 {
-            advancePhase()
+
+        if phase == .working {
+            if warnEnabled, !warned, remaining == warnSeconds, workSeconds > warnSeconds {
+                warned = true
+                let when = warnSeconds >= 60 ? "1 min" : "\(warnSeconds)s"
+                Notifier.notify(
+                    title: "Break coming up ⏳",
+                    body: "Break in \(when) — find a stopping point so you don't get pulled back mid-task.",
+                    sound: "Tink")
+                dlog("pre-break warning fired")
+            }
+            if eyeEnabled {
+                eyeElapsed += 1
+                if eyeElapsed >= eyeInterval {
+                    eyeElapsed = 0
+                    Notifier.notify(title: "Eye break 👀", body: "Look ~20 ft away for about 20 seconds.", sound: "Pop")
+                    dlog("eye reminder fired")
+                }
+            }
         }
+
+        if remaining <= 0 { advancePhase() }
+        if phase == .onBreak, overlay.isVisible { overlay.updateCountdown(remaining: remaining) }
         updateTitle()
     }
 
@@ -59,17 +101,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .working:
             phase = .onBreak
             remaining = breakSeconds
-            Notifier.notify(
-                title: "Time for a break ☕",
-                body: "Step away for \(breakMinutes) min. Look ~20 ft away, stand up, hydrate.",
-                sound: "Glass")
+            warned = false
+            suggestionIdx += 1
+            if strictMode {
+                Notifier.playSound("Glass")
+                overlay.show(
+                    total: breakSeconds, skipDelay: skipDelaySeconds, plan: breakPlan,
+                    allowPostpone: postponesUsed < maxPostpones, suggestionIndex: suggestionIdx)
+                dlog("break started — overlay shown (postponesUsed=\(postponesUsed))")
+            } else {
+                Notifier.notify(
+                    title: "Time for a break ☕",
+                    body: "Step away for \(breakMinutes) min. \(breakPlan)", sound: "Glass")
+                dlog("break started — notification only")
+            }
         case .onBreak:
             phase = .working
             remaining = workSeconds
-            Notifier.notify(
-                title: "Break's over 💻",
-                body: "Back to it — next break in \(workMinutes) min.",
-                sound: "Ping")
+            warned = false
+            eyeElapsed = 0
+            postponesUsed = 0
+            overlay.hide()
+            Notifier.notify(title: "Break's over 💻", body: "Back to it — next break in \(workMinutes) min.", sound: "Ping")
+            dlog("break ended naturally — back to work")
         }
     }
 
@@ -78,8 +132,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateTitle() {
         guard let button = statusItem.button else { return }
         let emoji = paused ? "⏸" : (phase == .working ? "💻" : "☕")
-        let text = "\(emoji) \(mmss(remaining))"
-        button.attributedTitle = NSAttributedString(string: text, attributes: [.font: monoFont])
+        button.attributedTitle = NSAttributedString(
+            string: "\(emoji) \(mmss(remaining))", attributes: [.font: monoFont])
     }
 
     private func mmss(_ seconds: Int) -> String {
@@ -92,7 +146,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
-        // Status line
         let statusText: String
         if paused {
             statusText = "⏸ Paused"
@@ -106,18 +159,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(status)
         menu.addItem(.separator())
 
-        // Controls
         menu.addItem(item(paused ? "Resume" : "Pause", #selector(togglePause)))
-        let skipTitle = phase == .working ? "Start break now" : "End break now"
-        menu.addItem(item(skipTitle, #selector(skipPhase)))
+        menu.addItem(item(phase == .working ? "Start break now" : "End break now", #selector(skipPhase)))
         menu.addItem(item("Reset timer", #selector(resetTimer)))
         menu.addItem(.separator())
 
-        // Daily checklist
         menu.addItem(buildChecklistItem())
+        menu.addItem(buildBreakBehaviorItem())
         menu.addItem(.separator())
 
-        // Settings
         menu.addItem(buildDurationsItem())
         let login = item("Start at login", #selector(toggleLogin))
         login.state = LoginItem.isEnabled ? .on : .off
@@ -125,6 +175,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         menu.addItem(item("Quit Jude Gao Routine", #selector(quit)))
+    }
+
+    private func buildBreakBehaviorItem() -> NSMenuItem {
+        let parent = NSMenuItem(title: "Break behavior", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+
+        let strict = item("Strict break screen (blocks work)", #selector(toggleStrict))
+        strict.state = strictMode ? .on : .off
+        sub.addItem(strict)
+
+        let warn = item("Warn 1 min before break", #selector(toggleWarn))
+        warn.state = warnEnabled ? .on : .off
+        sub.addItem(warn)
+
+        let eye = item("20-20-20 eye reminders", #selector(toggleEye))
+        eye.state = eyeEnabled ? .on : .off
+        sub.addItem(eye)
+
+        sub.addItem(.separator())
+        sub.addItem(item("Edit break plan…", #selector(editBreakPlan)))
+        parent.submenu = sub
+        return parent
     }
 
     private func buildChecklistItem() -> NSMenuItem {
@@ -184,22 +256,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return mi
     }
 
-    // MARK: - Actions
+    // MARK: - Break actions
 
-    @objc private func togglePause() {
-        paused.toggle()
+    private func skipBreak() {
+        overlay.hide()
+        phase = .working
+        remaining = workSeconds
+        warned = false
+        postponesUsed = 0
         updateTitle()
+        dlog("break skipped by user")
     }
 
-    @objc private func skipPhase() {
-        advancePhase()
+    private func postponeBreak() {
+        guard postponesUsed < maxPostpones else { return }
+        postponesUsed += 1
+        overlay.hide()
+        phase = .working
+        remaining = postponeSeconds
+        warned = false
         updateTitle()
+        dlog("break postponed (\(postponesUsed)/\(maxPostpones))")
     }
+
+    // MARK: - Menu actions
+
+    @objc private func togglePause() { paused.toggle(); updateTitle() }
+
+    @objc private func skipPhase() { advancePhase(); updateTitle() }
 
     @objc private func resetTimer() {
+        overlay.hide()
         phase = .working
         remaining = workSeconds
         paused = false
+        warned = false
+        postponesUsed = 0
+        eyeElapsed = 0
         updateTitle()
     }
 
@@ -208,12 +301,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Checklist.toggle(title)
     }
 
-    @objc private func resetChecklist() {
-        Checklist.resetToday()
-    }
+    @objc private func resetChecklist() { Checklist.resetToday() }
 
     @objc private func editChecklistItems() {
-        _ = Checklist.loadItems() // ensure the file exists
+        _ = Checklist.loadItems()
         NSWorkspace.shared.open(Checklist.itemsFile)
     }
 
@@ -229,13 +320,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateTitle()
     }
 
+    @objc private func toggleStrict() { flip("strictBreakScreen", default: true) }
+    @objc private func toggleWarn() { flip("warnBeforeBreak", default: true) }
+    @objc private func toggleEye() { flip("eye202020", default: false) }
+
+    private func flip(_ key: String, default def: Bool) {
+        let current = UserDefaults.standard.object(forKey: key) as? Bool ?? def
+        UserDefaults.standard.set(!current, forKey: key)
+    }
+
+    @objc private func editBreakPlan() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Your break plan"
+        alert.informativeText =
+            "What will you do when the timer ends? A specific “when the timer ends, I'll ___” plan makes you far more likely to actually take the break (implementation intentions, Gollwitzer & Sheeran 2006)."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.stringValue = breakPlan
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            UserDefaults.standard.set(field.stringValue, forKey: "breakPlan")
+        }
+    }
+
     @objc private func toggleLogin() {
         if LoginItem.isEnabled { LoginItem.disable() } else { LoginItem.enable() }
     }
 
-    @objc private func quit() {
-        NSApp.terminate(nil)
-    }
+    @objc private func quit() { NSApp.terminate(nil) }
 
     // MARK: - Checklist nudge (once per day)
 
@@ -247,7 +361,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         UserDefaults.standard.set(Checklist.todayString(), forKey: key)
         Notifier.notify(
             title: "Daily checklist 📋",
-            body: "\(total) items to set up your day — open the menu bar to check them off.",
-            sound: "Tink")
+            body: "\(total) items to set up your day — open the menu bar to check them off.", sound: "Tink")
     }
 }
