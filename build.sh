@@ -1,14 +1,14 @@
 #!/bin/bash
 # Build, bundle, ad-hoc sign, install, and (by default) enable start-at-login.
 # Usage:
-#   ./build.sh              build + install to ~/Applications + start at login + launch
+#   ./build.sh              build + install to /Applications + start at login + launch
 #   ./build.sh --no-login   build + install only (no LaunchAgent, no auto-launch)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 EXEC_NAME="JudeGaoRoutine"
 APP_DISPLAY="Jude Gao Routine"
-APP_DIR="$HOME/Applications/$APP_DISPLAY.app"
+APP_DIR="/Applications/$APP_DISPLAY.app"
 BUILD="$ROOT/build"
 LABEL="com.judegao.routine"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"

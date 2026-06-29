@@ -18,14 +18,14 @@ cd ~/workspace/JudeGaoRoutine
 ./build.sh
 ```
 
-This compiles, installs `Jude Gao Routine.app` to `~/Applications`, ad-hoc signs
+This compiles, installs `Jude Gao Routine.app` to `/Applications`, ad-hoc signs
 it, enables start-at-login, and launches it. You'll see `💻 45:00` in the menu bar.
 
 Build without auto-start / auto-launch:
 
 ```bash
 ./build.sh --no-login
-open "$HOME/Applications/Jude Gao Routine.app"
+open "/Applications/Jude Gao Routine.app"
 ```
 
 ## How it works
@@ -87,7 +87,7 @@ It's a plain JSON array of strings. Changes apply the next time you open the men
 ```bash
 launchctl unload -w ~/Library/LaunchAgents/com.judegao.routine.plist
 rm -f ~/Library/LaunchAgents/com.judegao.routine.plist
-rm -rf "$HOME/Applications/Jude Gao Routine.app"
+rm -rf "/Applications/Jude Gao Routine.app"
 rm -rf ~/Library/Application\ Support/JudeGaoRoutine
 ```
 
